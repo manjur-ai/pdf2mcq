@@ -177,11 +177,13 @@ def main():
         if args.pdf_url:
             print(f"Fetching PDFs: {args.pdf_url}", file=sys.stderr)
             mcq_set = gen.from_pdf_urls(args.pdf_url, n=n, difficulty_mix=difficulty,
-                                        focus_topics=topics, custom_instructions=instructions)
+                                        focus_topics=topics, custom_instructions=instructions,
+                                        ocr_model=args.ocr_model, mcq_model=args.mcq_model)
         if args.pdf_path:
             print(f"Reading PDFs: {args.pdf_path}", file=sys.stderr)
             mcq_set = gen.from_pdf_paths(args.pdf_path, n=n, difficulty_mix=difficulty,
-                                         focus_topics=topics, custom_instructions=instructions)
+                                         focus_topics=topics, custom_instructions=instructions,
+                                         ocr_model=args.ocr_model, mcq_model=args.mcq_model)
     except Exception as e:
         print(f"Generation failed: {e}", file=sys.stderr)
         sys.exit(1)
