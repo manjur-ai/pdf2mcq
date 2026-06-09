@@ -26,7 +26,7 @@ Schema:
     "marks": <1 if multi=false, 2 if multi=true>,
     "negative_marks": <0.25 if multi=false, 0 if multi=true>,
     "difficulty": "<easy|medium|hard>",
-    "explaination": "<brief explanation based only on the content, or empty string>"
+    "explanation": "<brief explanation based only on the content, or empty string>"
   }
 ]
 
@@ -50,7 +50,7 @@ Rules:
     - it is answerable from the content
     - the correct answer index/indices match the options
     - "multi", "marks", and "negative_marks" are consistent
-    - "explaination" matches the selected answer(s)
+    - "explanation" matches the selected answer(s)
     - no unsupported fact is included
 11. Drop any question that fails validation.
 """

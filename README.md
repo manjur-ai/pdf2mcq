@@ -159,7 +159,7 @@ print(mcq.to_json())
 #       "marks": 1.0,
 #       "negative_marks": 0.25,
 #       "difficulty": "easy",
-#       "explaination": "..."
+#       "explanation": "..."
 #     }
 #   ]
 # }

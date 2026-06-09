@@ -495,7 +495,7 @@ class PDFMCQGenerator:
             "Return ONLY a JSON array, no markdown. "
             'Each item: {"question_html": "...", "options": ["A","B","C","D"], '
             '"answers": [0], "difficulty": "easy|medium|hard", '
-            '"explaination": "..."}'
+            '"explanation": "..."}'
         )
         content: list = [{"type": "text", "text": "\n".join(instr_parts)}]
         for png in pngs:
@@ -736,7 +736,7 @@ class PDFMCQGenerator:
                     marks=marks,
                     negative_marks=negative_marks,
                     difficulty=item.get("difficulty", "medium").lower(),
-                    explaination=item.get("explaination", item.get("explanation", "")),
+                    explanation=item.get("explanation", item.get("explaination", "")),
                 )
                 questions.append(q)
             except (KeyError, TypeError, ValueError):
