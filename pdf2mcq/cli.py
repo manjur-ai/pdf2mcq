@@ -84,6 +84,16 @@ def main():
                           help="Ollama API base URL (default: http://localhost:11434/v1). "
                                "Only used when --provider ollama.")
 
+    ocr_group = parser.add_argument_group("OCR & image processing")
+    ocr_group.add_argument("--ocr-model", default="pytesseract",
+                           help="OCR backend: 'pytesseract', 'auto', or any OpenRouter model ID "
+                                "(e.g. 'openai/gpt-4o'). (default: pytesseract)")
+    ocr_group.add_argument("--ocr-models", default="",
+                           help="Comma-separated priority model list for --ocr-model auto. "
+                                "E.g. 'gpt-4o,gemma-27b,gemma-12b,pytesseract'")
+    ocr_group.add_argument("--save-ocr-path", default="",
+                           help="File path to save OCR text when method=twostep")
+
     pdf_group = parser.add_argument_group("PDF processing")
     pdf_group.add_argument("--method", default="twostep", choices=["twostep", "images2mcq"],
                            help="Processing: 'twostep' (OCR->MCQ) or 'images2mcq' (vision direct). "
@@ -129,6 +139,9 @@ def main():
         sys.exit(1)
 
     api_key = _get_api_key(args)
+    ocr_models = None
+    if args.ocr_models:
+        ocr_models = [m.strip() for m in args.ocr_models.split(",") if m.strip()]
     mcq_model_list = None
     if args.mcq_models:
         mcq_model_list = [m.strip() for m in args.mcq_models.split(",") if m.strip()]
@@ -139,8 +152,11 @@ def main():
             provider=args.provider,
             mcq_model=args.mcq_model,
             mcq_model_list=mcq_model_list,
+            ocr_model=args.ocr_model,
+            ocr_models=ocr_models,
             method=args.method,
             batch_size=args.batch_size,
+            save_ocr_path=args.save_ocr_path or None,
             pdf_backend=args.pdf_backend,
             pdf_scanned_max_pages=args.scanned_max_pages,
             prompt_log_path=args.prompt_log_path or None,

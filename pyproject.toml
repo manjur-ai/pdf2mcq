@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf2mcq"
-version = "1.1.0"
+version = "1.2.0"
 description = "Convert PDF files (text, scanned, mixed) into MCQ questions using AI"
 readme = "README.md"
 license = "MIT"

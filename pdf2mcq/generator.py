@@ -138,29 +138,54 @@ def _make_backend(provider: str, api_key: str, mcq_model: str, **kwargs):
 
 
 class _OverrideContext:
-    def __init__(self, gen, api_key_override, prompt_log_path):
+    def __init__(self, gen, api_key_override, prompt_log_path,
+                 ocr_model=None, mcq_model=None):
         self.gen = gen
         self.api_key = api_key_override
         self.log_path = prompt_log_path
-        self._orig_backend = None
-        self._orig_log = None
+        self.ocr_model = ocr_model
+        self.mcq_model = mcq_model
+        self._saved = {}
 
     def __enter__(self):
         if self.api_key is not None:
-            self._orig_backend = self.gen.backend
+            self._saved['backend'] = self.gen.backend
             self.gen.backend = _make_backend(
                 self.gen.provider, self.api_key, self.gen.mcq_model,
             )
         if self.log_path is not None:
-            self._orig_log = getattr(self.gen, "prompt_log_path", None)
+            self._saved['prompt_log_path'] = getattr(self.gen, "prompt_log_path", None)
             self.gen.prompt_log_path = self.log_path
+        if self.ocr_model is not None:
+            ocr_val = self.ocr_model.lower()
+            if hasattr(self.gen, 'pdf_extractor'):
+                self._saved['pdf_extractor.scanned_backend'] = self.gen.pdf_extractor.scanned_backend
+                self.gen.pdf_extractor.scanned_backend = ocr_val
+        if self.mcq_model is not None:
+            _DEFAULT_VISION = "google/gemini-2.5-flash-lite"
+            _vis_model = self.mcq_model if self.mcq_model not in ("", "auto") else _DEFAULT_VISION
+            if hasattr(self.gen, '_vision_model'):
+                self._saved['_vision_model'] = self.gen._vision_model
+                self.gen._vision_model = _vis_model
+            if hasattr(self.gen, 'pdf_extractor') and hasattr(self.gen.pdf_extractor, 'vision_model'):
+                self._saved['pdf_extractor.vision_model'] = self.gen.pdf_extractor.vision_model
+                self.gen.pdf_extractor.vision_model = _vis_model
+            _key = getattr(self.gen, '_resolved_api_key', None) or "ollama"
+            self._saved['backend'] = self.gen.backend
+            self.gen.backend = _make_backend(self.gen.provider, _key, self.mcq_model)
         return self
 
     def __exit__(self, *args):
-        if self._orig_backend is not None:
-            self.gen.backend = self._orig_backend
-        if self.log_path is not None:
-            self.gen.prompt_log_path = self._orig_log
+        if 'backend' in self._saved:
+            self.gen.backend = self._saved['backend']
+        if 'prompt_log_path' in self._saved:
+            self.gen.prompt_log_path = self._saved['prompt_log_path']
+        if 'pdf_extractor.scanned_backend' in self._saved:
+            self.gen.pdf_extractor.scanned_backend = self._saved['pdf_extractor.scanned_backend']
+        if 'pdf_extractor.vision_model' in self._saved:
+            self.gen.pdf_extractor.vision_model = self._saved['pdf_extractor.vision_model']
+        if '_vision_model' in self._saved:
+            self.gen._vision_model = self._saved['_vision_model']
 
 
 class PDFMCQGenerator:
@@ -177,12 +202,18 @@ class PDFMCQGenerator:
         provider: str = "openrouter",
         mcq_model: str = "",
         mcq_model_list: Optional[List[str]] = None,
+        ocr_model: str = "pytesseract",
+        ocr_models: Optional[List[str]] = None,
+        ocr_fallback: bool = True,
+        ocr_lang: str = "eng",
         method: str = "twostep",
         batch_size: int = 10,
         max_tokens: int = 4096,
         custom_instructions: Optional[str] = None,
         prompt_log_path: Optional[str] = None,
+        save_ocr_path: Optional[str] = None,
         api_key_override: Optional[str] = None,
+        extractor_kwargs: Optional[dict] = None,
         pdf_backend: str = "auto_detect",
         pdf_scanned_max_pages: int = 50,
         pdf_chunk_size: int = 1500,
@@ -206,29 +237,39 @@ class PDFMCQGenerator:
                     f"No API key supplied. Pass api_key= or set "
                     f"{self.ENV_KEYS.get(self.provider, 'YOUR_API_KEY')} env var."
                 )
+        self._resolved_api_key = _key
         self.backend = _make_backend(self.provider, _key, self.mcq_model, **backend_kwargs)
         if api_key_override:
+            self._resolved_api_key = api_key_override
             self.backend = _make_backend(self.provider, api_key_override, self.mcq_model, **backend_kwargs)
         self.batch_size = max(1, batch_size)
         self.max_tokens = max_tokens
 
         _DEFAULT_VISION = "google/gemini-2.5-flash-lite"
         if self.mcq_model and self.mcq_model not in ("auto",):
-            self._vision_model = self.mcq_model
+            _vision_model = self.mcq_model
         else:
-            self._vision_model = _DEFAULT_VISION
-
+            _vision_model = _DEFAULT_VISION
+        self._vision_model = _vision_model
         self._vision_free_model = "google/gemma-3-12b-it"
 
         self.pdf_extractor = PDFExtractor(
             backend=pdf_backend,
             chunk_size=pdf_chunk_size,
             scanned_max_pages=pdf_scanned_max_pages,
+            scanned_backend=ocr_model,
+            vision_provider="openrouter",
+            vision_model=_vision_model,
+            vision_free_model=self._vision_free_model,
             vision_api_key=_key,
+            ocr_fallback=ocr_fallback,
+            ocr_lang=ocr_lang,
+            ocr_models=ocr_models,
         )
 
         self.custom_instructions = custom_instructions or ""
         self.prompt_log_path = prompt_log_path
+        self.save_ocr_path = save_ocr_path
 
     def _log_prompt(self, label: str, text: str):
         path = getattr(self, "prompt_log_path", None)
@@ -240,8 +281,11 @@ class PDFMCQGenerator:
                     f.write(f"\n===== {label} =====\n{text}\n")
 
     def _with_overrides(self, api_key_override: Optional[str] = None,
-                        prompt_log_path: Optional[str] = None):
-        return _OverrideContext(self, api_key_override, prompt_log_path)
+                        prompt_log_path: Optional[str] = None,
+                        ocr_model: Optional[str] = None,
+                        mcq_model: Optional[str] = None):
+        return _OverrideContext(self, api_key_override, prompt_log_path,
+                                ocr_model=ocr_model, mcq_model=mcq_model)
 
     def _fetch_pdf_render(self, url_or_path: str, source_url: str) -> List[bytes]:
         """Download/read a PDF and render all pages as PNG images."""
@@ -263,8 +307,11 @@ class PDFMCQGenerator:
         custom_instructions: Optional[str] = None,
         api_key_override: Optional[str] = None,
         prompt_log_path: Optional[str] = None,
+        ocr_model: Optional[str] = None,
+        mcq_model: Optional[str] = None,
     ) -> MCQSet:
-        with self._with_overrides(api_key_override, prompt_log_path):
+        with self._with_overrides(api_key_override, prompt_log_path,
+                                  ocr_model=ocr_model, mcq_model=mcq_model):
             if isinstance(urls, str):
                 urls = [urls]
             if self.method == "images2mcq":
@@ -311,8 +358,11 @@ class PDFMCQGenerator:
         custom_instructions: Optional[str] = None,
         api_key_override: Optional[str] = None,
         prompt_log_path: Optional[str] = None,
+        ocr_model: Optional[str] = None,
+        mcq_model: Optional[str] = None,
     ) -> MCQSet:
-        with self._with_overrides(api_key_override, prompt_log_path):
+        with self._with_overrides(api_key_override, prompt_log_path,
+                                  ocr_model=ocr_model, mcq_model=mcq_model):
             if isinstance(paths, str):
                 paths = [paths]
             if self.method == "images2mcq":
