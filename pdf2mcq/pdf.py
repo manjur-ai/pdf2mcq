@@ -58,6 +58,38 @@ def _chunk_text(text: str, chunk_size: int = 1500, overlap: int = 150) -> List[s
     return [c for c in chunks if c]
 
 
+def _parse_page_range(range_str: Optional[str]) -> Optional[List[int]]:
+    if not range_str or not range_str.strip():
+        return None
+    pages: List[int] = []
+    for part in range_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                start_str, end_str = part.split("-", 1)
+                start, end = int(start_str.strip()), int(end_str.strip())
+                if start < 1 or end < start:
+                    raise ValueError
+                pages.extend(range(start - 1, end))
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Invalid page range: '{part}'. Use format like '1-10' or '1,3,5'."
+                )
+        else:
+            try:
+                p = int(part)
+                if p < 1:
+                    raise ValueError
+                pages.append(p - 1)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Invalid page number: '{part}'. Pages are 1-indexed."
+                )
+    return sorted(set(pages))
+
+
 def _count_pdf_pages(pdf_bytes: bytes) -> int:
     import fitz
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -105,13 +137,16 @@ class _PyMuPDFBackend:
                 "Install with:  pip install pdf2mcq  or  pip install pymupdf"
             )
 
-    def extract(self, pdf_bytes: bytes, source_url: str = "") -> Tuple[str, List[Dict]]:
+    def extract(self, pdf_bytes: bytes, source_url: str = "",
+                page_numbers: Optional[List[int]] = None) -> Tuple[str, List[Dict]]:
         import fitz
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         pages = []
         full_parts = []
 
         for page_num, page in enumerate(doc, 1):
+            if page_numbers is not None and (page_num - 1) not in page_numbers:
+                continue
             text = page.get_text("text").strip()
             tables = []
             try:
@@ -228,17 +263,20 @@ class PDFExtractor:
         self.ocr_lang = ocr_lang
         self._primary = self._make_backend(self.backend)
 
-    def from_url(self, url: str) -> List[ContentBlock]:
+    def from_url(self, url: str,
+                 page_numbers: Optional[List[int]] = None) -> List[ContentBlock]:
         print(f"  [pdf2mcq] Downloading PDF: {url}")
         pdf_bytes = _fetch_bytes(url, timeout=self.timeout, user_agent=self.user_agent)
-        return self.from_bytes(pdf_bytes, source_url=url)
+        return self.from_bytes(pdf_bytes, source_url=url, page_numbers=page_numbers)
 
-    def from_bytes(self, pdf_bytes: bytes, source_url: str = "") -> List[ContentBlock]:
+    def from_bytes(self, pdf_bytes: bytes, source_url: str = "",
+                   page_numbers: Optional[List[int]] = None) -> List[ContentBlock]:
         if self.backend == "image":
-            return self._extract_scanned(pdf_bytes, source_url)
+            return self._extract_scanned(pdf_bytes, source_url, page_numbers=page_numbers)
 
         if self.backend == "pymupdf":
-            full_text, pages, backend_used = self._extract_with_fallback(pdf_bytes, source_url)
+            full_text, pages, backend_used = self._extract_with_fallback(
+                pdf_bytes, source_url, page_numbers=page_numbers)
             if not full_text.strip():
                 print(f"  [pdf2mcq] \u26a0 No text extracted from PDF: {source_url}")
                 return []
@@ -248,21 +286,24 @@ class PDFExtractor:
         print(f"  [pdf2mcq] PDF scan type: {scan_type} ({source_url})")
 
         if scan_type == "scanned":
-            return self._extract_scanned(pdf_bytes, source_url)
+            return self._extract_scanned(pdf_bytes, source_url, page_numbers=page_numbers)
         elif scan_type == "mixed":
-            blocks = self._extract_mixed(pdf_bytes, source_url)
+            blocks = self._extract_mixed(pdf_bytes, source_url, page_numbers=page_numbers)
             if blocks:
                 return blocks
 
-        full_text, pages, backend_used = self._extract_with_fallback(pdf_bytes, source_url)
+        full_text, pages, backend_used = self._extract_with_fallback(
+            pdf_bytes, source_url, page_numbers=page_numbers)
         if not full_text.strip():
             print(f"  [pdf2mcq] \u26a0 No text extracted from PDF: {source_url}")
             return []
         return self._make_blocks(full_text, pages, backend_used, source_url)
 
-    def from_path(self, path: str) -> List[ContentBlock]:
+    def from_path(self, path: str,
+                  page_numbers: Optional[List[int]] = None) -> List[ContentBlock]:
         pdf_bytes = Path(path).read_bytes()
-        return self.from_bytes(pdf_bytes, source_url=f"file://{path}")
+        return self.from_bytes(pdf_bytes, source_url=f"file://{path}",
+                               page_numbers=page_numbers)
 
     def detect_scan_type(self, pdf_bytes: bytes) -> str:
         return self._primary.detect_scan_type(pdf_bytes)
@@ -288,13 +329,18 @@ class PDFExtractor:
                 enriched.append(block)
         return enriched
 
-    def _extract_scanned(self, pdf_bytes: bytes, source_url: str) -> List[ContentBlock]:
+    def _extract_scanned(self, pdf_bytes: bytes, source_url: str,
+                         page_numbers: Optional[List[int]] = None) -> List[ContentBlock]:
         from .image_ocr import _ocr_vision_api
 
         page_count = _count_pdf_pages(pdf_bytes)
-        print(f"  [pdf2mcq] Rendering {page_count} pages as images for vision OCR...")
-
-        pngs = _render_pdf_pages_to_pngs(pdf_bytes, max_pages=self.scanned_max_pages)
+        if page_numbers is not None:
+            page_numbers = [p for p in page_numbers if p < page_count]
+            print(f"  [pdf2mcq] Rendering {len(page_numbers)}/{page_count} pages as images for vision OCR...")
+            pngs = _render_specific_pages(pdf_bytes, page_numbers, max_pages=self.scanned_max_pages)
+        else:
+            print(f"  [pdf2mcq] Rendering {page_count} pages as images for vision OCR...")
+            pngs = _render_pdf_pages_to_pngs(pdf_bytes, max_pages=self.scanned_max_pages)
         if not pngs:
             return []
 
@@ -355,7 +401,8 @@ class PDFExtractor:
         )
         return blocks
 
-    def _extract_mixed(self, pdf_bytes: bytes, source_url: str) -> List[ContentBlock]:
+    def _extract_mixed(self, pdf_bytes: bytes, source_url: str,
+                       page_numbers: Optional[List[int]] = None) -> List[ContentBlock]:
         import fitz
         from .image_ocr import _ocr_vision_api
 
@@ -363,6 +410,8 @@ class PDFExtractor:
         scanned_page_nums = []
         text_page_texts = {}
         for i, page in enumerate(doc):
+            if page_numbers is not None and i not in page_numbers:
+                continue
             text_len = len(page.get_text("text").strip())
             img_count = len(page.get_images())
             if text_len < 10 and img_count >= 1:
@@ -544,9 +593,11 @@ class PDFExtractor:
             "Choose: auto_detect | pymupdf | image"
         )
 
-    def _extract_with_fallback(self, pdf_bytes: bytes, source_url: str) -> Tuple[str, List[Dict], str]:
+    def _extract_with_fallback(self, pdf_bytes: bytes, source_url: str,
+                               page_numbers: Optional[List[int]] = None) -> Tuple[str, List[Dict], str]:
         try:
-            full_text, pages = self._primary.extract(pdf_bytes, source_url)
+            full_text, pages = self._primary.extract(pdf_bytes, source_url,
+                                                     page_numbers=page_numbers)
         except Exception as e:
             print(f"  [pdf2mcq] \u26a0 {self._primary.name} failed: {e}")
             full_text, pages = "", []

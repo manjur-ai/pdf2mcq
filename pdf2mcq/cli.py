@@ -1,3 +1,14 @@
+"""
+pdf2mcq CLI
+===========
+
+Usage examples
+--------------
+pdf2mcq --pdf-path textbook.pdf -n 10
+pdf2mcq --pdf-url https://example.com/notes.pdf -o questions.json --format json
+pdf2mcq --pdf-folder ./textbooks/
+pdf2mcq --version
+"""
 import argparse
 import json
 import os
@@ -66,6 +77,10 @@ def main():
     gen_group.add_argument("--topics", nargs="*", help="Focus topics")
     gen_group.add_argument("--instructions", "-i", default="",
                            help='Custom instructions e.g. "Make answers very close and confusing"')
+    gen_group.add_argument("--pages", default=None,
+                           help='Page range e.g. "1-10,15,20-25" (1-indexed)')
+    gen_group.add_argument("--progress", action="store_true",
+                           help="Show progress bar during MCQ generation")
     gen_group.add_argument("--batch-size", type=int, default=10,
                            help="Questions per API call (default: 10)")
 
@@ -93,18 +108,18 @@ def main():
                                 "E.g. 'gpt-4o,gemma-27b,gemma-12b,pytesseract'")
     ocr_group.add_argument("--save-ocr-path", default="",
                            help="File path to save OCR text when method=twostep")
-
-    pdf_group = parser.add_argument_group("PDF processing")
-    pdf_group.add_argument("--method", default="twostep", choices=["twostep", "images2mcq"],
+    ocr_group.add_argument("--method", default="twostep", choices=["twostep", "images2mcq"],
                            help="Processing: 'twostep' (OCR->MCQ) or 'images2mcq' (vision direct). "
                                 "(default: twostep)")
+    ocr_group.add_argument("--prompt-log-path", default="",
+                           help="Dump prompts to file, or 'stdout' / '-' for terminal")
+
+    pdf_group = parser.add_argument_group("PDF processing")
     pdf_group.add_argument("--pdf-backend", default="auto_detect",
                            choices=["auto_detect", "pymupdf", "image"],
                            help="PDF extraction backend (default: auto_detect)")
     pdf_group.add_argument("--scanned-max-pages", type=int, default=50,
                            help="Max pages to OCR for scanned PDFs (default: 50)")
-    pdf_group.add_argument("--prompt-log-path", default="",
-                           help="Dump prompts to file, or 'stdout' / '-' for terminal")
 
     out_group = parser.add_argument_group("Output")
     out_group.add_argument("--output", "-o", default="",
@@ -176,14 +191,18 @@ def main():
     try:
         if args.pdf_url:
             print(f"Fetching PDFs: {args.pdf_url}", file=sys.stderr)
-            mcq_set = gen.from_pdf_urls(args.pdf_url, n=n, difficulty_mix=difficulty,
+            mcq_set = gen.from_pdf_urls(args.pdf_url, n=n, pages=args.pages,
+                                        difficulty_mix=difficulty,
                                         focus_topics=topics, custom_instructions=instructions,
-                                        ocr_model=args.ocr_model, mcq_model=args.mcq_model)
+                                        ocr_model=args.ocr_model, mcq_model=args.mcq_model,
+                                        show_progress=args.progress)
         if args.pdf_path:
             print(f"Reading PDFs: {args.pdf_path}", file=sys.stderr)
-            mcq_set = gen.from_pdf_paths(args.pdf_path, n=n, difficulty_mix=difficulty,
+            mcq_set = gen.from_pdf_paths(args.pdf_path, n=n, pages=args.pages,
+                                         difficulty_mix=difficulty,
                                          focus_topics=topics, custom_instructions=instructions,
-                                         ocr_model=args.ocr_model, mcq_model=args.mcq_model)
+                                         ocr_model=args.ocr_model, mcq_model=args.mcq_model,
+                                         show_progress=args.progress)
     except Exception as e:
         print(f"Generation failed: {e}", file=sys.stderr)
         sys.exit(1)

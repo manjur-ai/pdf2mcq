@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import base64
+import base64 as _base64
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 from .models import ContentBlock, MCQQuestion, MCQSet
 from .prompts import build_system_prompt, build_user_prompt
-from .pdf import PDFExtractor, _render_pdf_pages_to_pngs, _count_pdf_pages, _fetch_bytes
+from .pdf import PDFExtractor, _render_pdf_pages_to_pngs, _render_specific_pages, _parse_page_range, _count_pdf_pages, _fetch_bytes
 
 
 class _AnthropicBackend:
@@ -287,14 +288,16 @@ class PDFMCQGenerator:
         return _OverrideContext(self, api_key_override, prompt_log_path,
                                 ocr_model=ocr_model, mcq_model=mcq_model)
 
-    def _fetch_pdf_render(self, url_or_path: str, source_url: str) -> List[bytes]:
-        """Download/read a PDF and render all pages as PNG images."""
+    def _fetch_pdf_render(self, url_or_path: str, source_url: str, page_numbers: Optional[List[int]] = None) -> List[bytes]:
+        """Download/read a PDF and render pages as PNG images."""
         if url_or_path.startswith("file://"):
             pdf_bytes = Path(url_or_path[7:]).read_bytes()
         elif url_or_path.startswith("http://") or url_or_path.startswith("https://"):
             pdf_bytes = _fetch_bytes(url_or_path, timeout=30)
         else:
             pdf_bytes = Path(url_or_path).read_bytes()
+        if page_numbers:
+            return _render_specific_pages(pdf_bytes, page_numbers)
         return _render_pdf_pages_to_pngs(pdf_bytes, max_pages=self.pdf_extractor.scanned_max_pages)
 
     def from_pdf_urls(
@@ -302,6 +305,7 @@ class PDFMCQGenerator:
         urls: Union[str, List[str]],
         n: int = 999,
         pdf_title: str = "",
+        pages: Optional[str] = None,
         difficulty_mix: Optional[str] = None,
         focus_topics: Optional[List[str]] = None,
         custom_instructions: Optional[str] = None,
@@ -309,15 +313,17 @@ class PDFMCQGenerator:
         prompt_log_path: Optional[str] = None,
         ocr_model: Optional[str] = None,
         mcq_model: Optional[str] = None,
+        show_progress: bool = False,
     ) -> MCQSet:
         with self._with_overrides(api_key_override, prompt_log_path,
                                   ocr_model=ocr_model, mcq_model=mcq_model):
             if isinstance(urls, str):
                 urls = [urls]
+            page_nums = _parse_page_range(pages)
             if self.method == "images2mcq":
                 all_pngs: List[bytes] = []
                 for url in urls:
-                    all_pngs.extend(self._fetch_pdf_render(url, url))
+                    all_pngs.extend(self._fetch_pdf_render(url, url, page_numbers=page_nums))
                 if not all_pngs:
                     raise ValueError("No pages could be rendered from PDF(s)")
                 title = pdf_title or (urls[0].split("/")[-1].replace(".pdf", "").replace("-", " ").replace("_", " ").title()
@@ -329,12 +335,16 @@ class PDFMCQGenerator:
                 return self._build_mcq_set(all_qs, n, title, urls[0], [])
             all_blocks: List[ContentBlock] = []
             for url in urls:
-                blocks = self.pdf_extractor.from_url(url)
+                blocks = self.pdf_extractor.from_url(url, page_numbers=page_nums)
                 if not blocks:
                     raise ValueError(f"No text could be extracted from PDF: {url}")
                 all_blocks.extend(blocks)
             if not all_blocks:
                 raise ValueError("No text could be extracted from any PDF")
+            if self.save_ocr_path:
+                ocr_text = "\n".join(b.content for b in all_blocks if b.content)
+                Path(self.save_ocr_path).write_text(ocr_text, encoding="utf-8")
+                print(f"  [pdf2mcq] OCR text saved to: {self.save_ocr_path}")
             title = pdf_title or (urls[0].split("/")[-1].replace(".pdf", "").replace("-", " ").replace("_", " ").title()
                                   if len(urls) == 1 else "PDFs")
             all_qs, _ = self._generate(
@@ -345,6 +355,7 @@ class PDFMCQGenerator:
                 difficulty_mix=difficulty_mix,
                 focus_topics=focus_topics,
                 custom_instructions=custom_instructions,
+                show_progress=show_progress,
             )
             return self._build_mcq_set(all_qs, n, title, urls[0], all_blocks)
 
@@ -353,6 +364,7 @@ class PDFMCQGenerator:
         paths: Union[str, List[str]],
         n: int = 999,
         pdf_title: str = "",
+        pages: Optional[str] = None,
         difficulty_mix: Optional[str] = None,
         focus_topics: Optional[List[str]] = None,
         custom_instructions: Optional[str] = None,
@@ -360,15 +372,17 @@ class PDFMCQGenerator:
         prompt_log_path: Optional[str] = None,
         ocr_model: Optional[str] = None,
         mcq_model: Optional[str] = None,
+        show_progress: bool = False,
     ) -> MCQSet:
         with self._with_overrides(api_key_override, prompt_log_path,
                                   ocr_model=ocr_model, mcq_model=mcq_model):
             if isinstance(paths, str):
                 paths = [paths]
+            page_nums = _parse_page_range(pages)
             if self.method == "images2mcq":
                 all_pngs: List[bytes] = []
                 for p in paths:
-                    all_pngs.extend(self._fetch_pdf_render(str(Path(p).resolve()), f"file://{p}"))
+                    all_pngs.extend(self._fetch_pdf_render(str(Path(p).resolve()), f"file://{p}", page_numbers=page_nums))
                 if not all_pngs:
                     raise ValueError("No pages could be rendered from PDF(s)")
                 title = pdf_title or (Path(paths[0]).stem.replace("-", " ").replace("_", " ").title()
@@ -380,12 +394,16 @@ class PDFMCQGenerator:
                 return self._build_mcq_set(all_qs, n, title, f"file://{paths[0]}", [])
             all_blocks: List[ContentBlock] = []
             for p in paths:
-                blocks = self.pdf_extractor.from_path(p)
+                blocks = self.pdf_extractor.from_path(p, page_numbers=page_nums)
                 if not blocks:
                     raise ValueError(f"No text could be extracted from PDF: {p}")
                 all_blocks.extend(blocks)
             if not all_blocks:
                 raise ValueError("No text could be extracted from any PDF")
+            if self.save_ocr_path:
+                ocr_text = "\n".join(b.content for b in all_blocks if b.content)
+                Path(self.save_ocr_path).write_text(ocr_text, encoding="utf-8")
+                print(f"  [pdf2mcq] OCR text saved to: {self.save_ocr_path}")
             title = pdf_title or (Path(paths[0]).stem.replace("-", " ").replace("_", " ").title()
                                   if len(paths) == 1 else "PDFs")
             all_qs, _ = self._generate(
@@ -396,6 +414,7 @@ class PDFMCQGenerator:
                 difficulty_mix=difficulty_mix,
                 focus_topics=focus_topics,
                 custom_instructions=custom_instructions,
+                show_progress=show_progress,
             )
             return self._build_mcq_set(all_qs, n, title, f"file://{paths[0]}", all_blocks)
 
@@ -431,6 +450,7 @@ class PDFMCQGenerator:
             metadata={
                 "provider": self.provider,
                 "mcq_model": getattr(self.backend, "mcq_model", "unknown"),
+                "method": self.method,
                 "requested_n": n,
                 "content_blocks": len(blocks),
                 "content_types": list({b.type for b in blocks}),
@@ -479,7 +499,7 @@ class PDFMCQGenerator:
         )
         content: list = [{"type": "text", "text": "\n".join(instr_parts)}]
         for png in pngs:
-            b64 = base64.b64encode(png).decode("utf-8")
+            b64 = _base64.b64encode(png).decode("utf-8")
             content.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:image/png;base64,{b64}"},
@@ -578,6 +598,7 @@ class PDFMCQGenerator:
         difficulty_mix: Optional[str],
         focus_topics: Optional[List[str]],
         custom_instructions: Optional[str] = None,
+        show_progress: bool = False,
     ) -> Tuple[List[MCQQuestion], str]:
         if not blocks:
             return [], ""
@@ -627,8 +648,22 @@ class PDFMCQGenerator:
             summary = self._build_summary(blocks)
             return all_questions, summary
 
+        batch_num = 0
+        total_batches = (remaining + self.batch_size - 1) // self.batch_size
+        if show_progress:
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(total=remaining, desc="Generating MCQs", unit="q")
+            except ImportError:
+                pbar = None
+        else:
+            pbar = None
+
         while remaining > 0:
+            batch_num += 1
             batch_n = min(remaining, self.batch_size)
+            if show_progress and pbar is None:
+                print(f"  [pdf2mcq] Batch {batch_num}/{total_batches} ({batch_n} questions)...", file=sys.stderr)
             user_prompt = build_user_prompt(
                 blocks=blocks,
                 n=batch_n,
@@ -643,12 +678,16 @@ class PDFMCQGenerator:
             batch_questions = self._parse_response(raw)
             all_questions.extend(batch_questions)
             remaining -= len(batch_questions)
+            if pbar is not None:
+                pbar.update(len(batch_questions))
 
             if len(batch_questions) == 0:
                 break
             if remaining > 0 and len(batch_questions) < batch_n:
                 break
 
+        if pbar is not None:
+            pbar.close()
         all_questions = all_questions[:n]
         summary = self._build_summary(blocks)
         return all_questions, summary

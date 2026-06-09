@@ -20,6 +20,8 @@ Built on top of **html2mcq**'s PDF pipeline, extracted as a standalone library f
 
 ## Quick Start
 
+## Quick Start
+
 ### CLI
 
 ```bash
@@ -34,6 +36,30 @@ pdf2mcq --pdf-folder ./textbooks/
 
 # Output as JSON
 pdf2mcq --pdf-path notes.pdf -o questions.json --format json
+
+# Use vision model directly (skip OCR)
+pdf2mcq --pdf-folder ./slides/ --method images2mcq
+
+# Override OCR model per call
+pdf2mcq --pdf-path scanned-doc.pdf --ocr-model "google/gemini-2.5-flash-lite"
+
+# Save OCR text to file
+pdf2mcq --pdf-path textbook.pdf --save-ocr-path ocr_output.txt
+
+# Custom instructions
+pdf2mcq --pdf-path notes.pdf -i "Focus on mathematical derivations"
+
+# Difficulty mix and topic focus
+pdf2mcq --pdf-path textbook.pdf --difficulty "40% easy, 40% medium, 20% hard" --topics calculus algebra
+
+# Page range (only process specific pages)
+pdf2mcq --pdf-url https://example.com/textbook.pdf --pages "1-10,15,20-25"
+
+# Show progress bar during MCQ generation
+pdf2mcq --pdf-folder ./textbooks/ --progress
+
+# Local Ollama
+pdf2mcq --pdf-path notes.pdf --provider ollama --mcq-model qwen2.5:7b
 ```
 
 ### Python API
@@ -57,9 +83,15 @@ print(mcq.to_json())
 
 # Multiple PDFs
 mcq = gen.from_pdf_paths(["chapter1.pdf", "chapter2.pdf", "chapter3.pdf"])
+
+# Page range (only process specific pages)
+mcq = gen.from_pdf_urls("https://example.com/textbook.pdf", n=10, pages="1-10,15,20-25")
+
+# Show progress bar
+mcq = gen.from_pdf_paths("textbook.pdf", n=10, show_progress=True)
 ```
 
-### Custom Instructions
+### Custom Instructions & Overrides
 
 ```python
 mcq = gen.from_pdf_paths(
@@ -68,7 +100,19 @@ mcq = gen.from_pdf_paths(
     difficulty_mix="50% easy, 50% hard",
     focus_topics=["machine learning", "neural networks"],
     custom_instructions="Focus on mathematical derivations",
+    ocr_model="google/gemini-2.5-flash-lite",  # per-call override
+    mcq_model="openai/gpt-4o",                  # per-call override
 )
+```
+
+### Vision Direct Method
+
+```python
+gen = PDFMCQGenerator(
+    api_key="sk-or-v1-...",
+    method="images2mcq",  # send PDF pages as images directly to vision model
+)
+mcq = gen.from_pdf_paths("scanned-textbook.pdf", n=10)
 ```
 
 ### Auto Model Selection
