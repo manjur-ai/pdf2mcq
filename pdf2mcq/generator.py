@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -8,7 +9,7 @@ from typing import List, Optional, Tuple, Union
 
 from .models import ContentBlock, MCQQuestion, MCQSet
 from .prompts import build_system_prompt, build_user_prompt
-from .pdf import PDFExtractor
+from .pdf import PDFExtractor, _render_pdf_pages_to_pngs, _count_pdf_pages, _fetch_bytes
 
 
 class _AnthropicBackend:
@@ -176,6 +177,7 @@ class PDFMCQGenerator:
         provider: str = "openrouter",
         mcq_model: str = "",
         mcq_model_list: Optional[List[str]] = None,
+        method: str = "twostep",
         batch_size: int = 10,
         max_tokens: int = 4096,
         custom_instructions: Optional[str] = None,
@@ -189,6 +191,9 @@ class PDFMCQGenerator:
         self.provider = provider.lower()
         self.mcq_model = mcq_model
         self.mcq_model_list = mcq_model_list
+        self.method = method.lower()
+        if self.method not in ("twostep", "images2mcq"):
+            raise ValueError(f"Unknown method '{method}'. Choose: twostep | images2mcq")
 
         if self.provider == "ollama":
             _key = "ollama"
@@ -206,6 +211,14 @@ class PDFMCQGenerator:
             self.backend = _make_backend(self.provider, api_key_override, self.mcq_model, **backend_kwargs)
         self.batch_size = max(1, batch_size)
         self.max_tokens = max_tokens
+
+        _DEFAULT_VISION = "google/gemini-2.5-flash-lite"
+        if self.mcq_model and self.mcq_model not in ("auto",):
+            self._vision_model = self.mcq_model
+        else:
+            self._vision_model = _DEFAULT_VISION
+
+        self._vision_free_model = "google/gemma-3-12b-it"
 
         self.pdf_extractor = PDFExtractor(
             backend=pdf_backend,
@@ -230,6 +243,16 @@ class PDFMCQGenerator:
                         prompt_log_path: Optional[str] = None):
         return _OverrideContext(self, api_key_override, prompt_log_path)
 
+    def _fetch_pdf_render(self, url_or_path: str, source_url: str) -> List[bytes]:
+        """Download/read a PDF and render all pages as PNG images."""
+        if url_or_path.startswith("file://"):
+            pdf_bytes = Path(url_or_path[7:]).read_bytes()
+        elif url_or_path.startswith("http://") or url_or_path.startswith("https://"):
+            pdf_bytes = _fetch_bytes(url_or_path, timeout=30)
+        else:
+            pdf_bytes = Path(url_or_path).read_bytes()
+        return _render_pdf_pages_to_pngs(pdf_bytes, max_pages=self.pdf_extractor.scanned_max_pages)
+
     def from_pdf_urls(
         self,
         urls: Union[str, List[str]],
@@ -244,6 +267,19 @@ class PDFMCQGenerator:
         with self._with_overrides(api_key_override, prompt_log_path):
             if isinstance(urls, str):
                 urls = [urls]
+            if self.method == "images2mcq":
+                all_pngs: List[bytes] = []
+                for url in urls:
+                    all_pngs.extend(self._fetch_pdf_render(url, url))
+                if not all_pngs:
+                    raise ValueError("No pages could be rendered from PDF(s)")
+                title = pdf_title or (urls[0].split("/")[-1].replace(".pdf", "").replace("-", " ").replace("_", " ").title()
+                                      if len(urls) == 1 else "PDFs")
+                all_qs = self._vision_mcq_pdf(all_pngs, n=n, page_title=title,
+                                              difficulty_mix=difficulty_mix,
+                                              focus_topics=focus_topics,
+                                              custom_instructions=custom_instructions)
+                return self._build_mcq_set(all_qs, n, title, urls[0], [])
             all_blocks: List[ContentBlock] = []
             for url in urls:
                 blocks = self.pdf_extractor.from_url(url)
@@ -279,6 +315,19 @@ class PDFMCQGenerator:
         with self._with_overrides(api_key_override, prompt_log_path):
             if isinstance(paths, str):
                 paths = [paths]
+            if self.method == "images2mcq":
+                all_pngs: List[bytes] = []
+                for p in paths:
+                    all_pngs.extend(self._fetch_pdf_render(str(Path(p).resolve()), f"file://{p}"))
+                if not all_pngs:
+                    raise ValueError("No pages could be rendered from PDF(s)")
+                title = pdf_title or (Path(paths[0]).stem.replace("-", " ").replace("_", " ").title()
+                                      if len(paths) == 1 else "PDFs")
+                all_qs = self._vision_mcq_pdf(all_pngs, n=n, page_title=title,
+                                              difficulty_mix=difficulty_mix,
+                                              focus_topics=focus_topics,
+                                              custom_instructions=custom_instructions)
+                return self._build_mcq_set(all_qs, n, title, f"file://{paths[0]}", [])
             all_blocks: List[ContentBlock] = []
             for p in paths:
                 blocks = self.pdf_extractor.from_path(p)
@@ -337,6 +386,74 @@ class PDFMCQGenerator:
                 "content_types": list({b.type for b in blocks}),
             },
         )
+
+    def _vision_mcq_pdf(
+        self, pngs: List[bytes], n: int, page_title: str,
+        difficulty_mix: Optional[str] = None,
+        focus_topics: Optional[List[str]] = None,
+        custom_instructions: Optional[str] = None,
+    ) -> List[MCQQuestion]:
+        """Send rendered PDF page images directly to a vision model for MCQ generation."""
+        api_key = self.pdf_extractor.vision_api_key
+        if not api_key:
+            return []
+
+        try:
+            import openai
+        except ImportError:
+            return []
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+        instr_parts = [f"Generate {n} MCQ questions based on the content in these PDF pages."]
+        if page_title:
+            instr_parts.insert(0, f"PAGE TITLE: {page_title}")
+        if difficulty_mix:
+            instr_parts.append(f"Difficulty distribution: {difficulty_mix}")
+        if focus_topics:
+            instr_parts.append(f"Focus especially on these topics: {', '.join(focus_topics)}")
+        if custom_instructions and custom_instructions.strip():
+            instr_parts.append(
+                f"\n--- CUSTOM INSTRUCTIONS (highest priority) ---\n"
+                f"{custom_instructions.strip()}\n"
+                f"--- END CUSTOM INSTRUCTIONS ---"
+            )
+        instr_parts.append(
+            "Return ONLY a JSON array, no markdown. "
+            'Each item: {"question_html": "...", "options": ["A","B","C","D"], '
+            '"answers": [0], "difficulty": "easy|medium|hard", '
+            '"explaination": "..."}'
+        )
+        content: list = [{"type": "text", "text": "\n".join(instr_parts)}]
+        for png in pngs:
+            b64 = base64.b64encode(png).decode("utf-8")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64}"},
+            })
+
+        self._log_prompt("VISION INSTRUCTION",
+                          f"Model: {self._vision_model}\n"
+                          f"Pages: {len(pngs)}\n"
+                          f"Instruction: {content[0]['text']}")
+
+        try:
+            resp = client.chat.completions.create(
+                model=self._vision_model,
+                messages=[{"role": "user", "content": content}],
+                max_tokens=8192,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if not raw:
+                print("  [pdf2mcq] \u26a0 vision model returned empty response")
+                return []
+            return self._parse_response(raw)
+        except Exception as e:
+            print(f"  [pdf2mcq] \u26a0 vision MCQ failed: {e}")
+            return []
 
     @staticmethod
     def _resolve_mcq_model_list(mcq_model_list: Optional[List] = None) -> List[dict]:

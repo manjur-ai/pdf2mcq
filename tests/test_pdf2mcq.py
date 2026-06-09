@@ -201,6 +201,19 @@ class TestPDFMCQGenerator:
         with pytest.raises(ValueError, match="No text"):
             gen.from_pdf_urls([], n=1)
 
+    def test_unknown_method_raises(self):
+        from pdf2mcq.generator import PDFMCQGenerator
+        with pytest.raises(ValueError, match="twostep | images2mcq"):
+            PDFMCQGenerator(api_key="sk-test", method="invalid")
+
+    def test_method_images2mcq_from_path_empty(self, tmp_path, monkeypatch):
+        from pdf2mcq.generator import PDFMCQGenerator
+        p = tmp_path / "empty.pdf"
+        p.write_text("not a pdf")
+        gen = PDFMCQGenerator(api_key="sk-test", method="images2mcq")
+        with pytest.raises((ValueError, Exception)):
+            gen.from_pdf_paths(str(p), n=1)
+
 
 class TestCLI:
     def test_cli_version(self, monkeypatch):

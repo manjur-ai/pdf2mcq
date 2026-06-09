@@ -85,6 +85,9 @@ def main():
                                "Only used when --provider ollama.")
 
     pdf_group = parser.add_argument_group("PDF processing")
+    pdf_group.add_argument("--method", default="twostep", choices=["twostep", "images2mcq"],
+                           help="Processing: 'twostep' (OCR->MCQ) or 'images2mcq' (vision direct). "
+                                "(default: twostep)")
     pdf_group.add_argument("--pdf-backend", default="auto_detect",
                            choices=["auto_detect", "pymupdf", "image"],
                            help="PDF extraction backend (default: auto_detect)")
@@ -136,6 +139,7 @@ def main():
             provider=args.provider,
             mcq_model=args.mcq_model,
             mcq_model_list=mcq_model_list,
+            method=args.method,
             batch_size=args.batch_size,
             pdf_backend=args.pdf_backend,
             pdf_scanned_max_pages=args.scanned_max_pages,
